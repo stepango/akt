@@ -29,19 +29,26 @@ private class SingleAct<T : Any>(
         strategy: Strategy = SaveMe
 ) : Act(id, strategy)
 
-fun Completable.toAct(id: String): Act = CompletableAct(id, this)
-fun <T : Any> Single<T>.toAct(id: String): Act = SingleAct(id, this)
+fun Completable.toAct(id: String, strategy: Strategy = SaveMe): Act = CompletableAct(id, this, strategy)
+fun <T : Any> Single<T>.toAct(id: String, strategy: Strategy = SaveMe): Act = SingleAct(id, this, strategy)
 
 class AgentImpl : Agent {
-    val map = ConcurrentHashMap<String, Disposable>()
+    private val map = ConcurrentHashMap<String, Disposable>()
 
     override fun execute(act: Act, e: (Throwable) -> Unit) = when {
-        map.containsKey(act.id) -> log("${act.id} - Act duplicate")
-        else -> startExecution(act, e).apply { log("${act.id} - Act Started") }
+        map.containsKey(act.id) -> when (act.strategy) {
+            KillMe -> {
+                cancel(act.id)
+                startExecution(act, e)
+            }
+            SaveMe -> log("${act.id} - Act duplicate")
+        }
+        else -> startExecution(act, e)
     }
 
     @Synchronized
     private fun startExecution(act: Act, e: (Throwable) -> Unit) {
+        log("${act.id} - Act Started")
         val removeFromMap = {
             map.remove(act.id)
             log("${act.id} - Act Finished")
@@ -49,9 +56,11 @@ class AgentImpl : Agent {
         when (act) {
             is CompletableAct -> act.completable
                     .doFinally(removeFromMap)
+                    .doOnDispose { log("${act.id} - Act Canceled") }
                     .subscribe({}, e)
             is SingleAct<*> -> act.single
                     .doFinally(removeFromMap)
+                    .doOnDispose { log("${act.id} - Act Canceled") }
                     .subscribe({}, e)
         }.let { map.put(act.id, it) }
     }
@@ -67,15 +76,10 @@ fun log(obj: Any) {
     System.out.println(obj)
 }
 
-fun <T : StrategyHolder> winner(me: T, notMe: T): T = when (me.strategy) {
-    KillMe -> notMe
-    SaveMe -> me
-}
-
 fun main(args: Array<String>) {
     val a = AgentImpl()
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello"))
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello"))
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello"))
+    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello", KillMe))
+    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello", KillMe))
+    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct("Hello", KillMe))
     CountDownLatch(1).await()
 }
