@@ -18,42 +18,39 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-sealed class Act(
-        val id: String,
-        override val strategy: Strategy,
-        override val groupStrategy: GroupStrategy,
-        override val groupKey: GroupKey
-) : StrategyHolder, GroupStrategyHolder
+interface Act : StrategyHolder, GroupStrategyHolder {
+    val id: String
+}
 
-private class CompletableAct(
-        id: String,
+class CompletableAct(
+        override val id: String,
         val completable: Completable,
-        strategy: Strategy = SaveMe,
-        groupStrategy: GroupStrategy = Default,
-        groupKey: GroupKey = defaultGroup
-) : Act(id, strategy, groupStrategy, groupKey)
+        override val strategy: Strategy = SaveMe,
+        override val groupStrategy: GroupStrategy = Default,
+        override val groupKey: GroupKey = defaultGroup
+) : Act
 
-private class SingleAct<T : Any>(
-        id: String,
+class SingleAct<T : Any>(
+        override val id: String,
         val single: Single<T>,
-        strategy: Strategy = SaveMe,
-        groupStrategy: GroupStrategy = Default,
-        groupKey: GroupKey = defaultGroup
-) : Act(id, strategy, groupStrategy, groupKey)
+        override val strategy: Strategy = SaveMe,
+        override val groupStrategy: GroupStrategy = Default,
+        override val groupKey: GroupKey = defaultGroup
+) : Act
 
 fun Completable.toAct(
         id: String,
         strategy: Strategy = SaveMe,
         groupStrategy: GroupStrategy = Default,
         groupKey: GroupKey = defaultGroup
-): Act = CompletableAct(id, this, strategy, groupStrategy)
+): Act = CompletableAct(id, this, strategy, groupStrategy, groupKey)
 
 fun <T : Any> Single<T>.toAct(
         id: String,
         strategy: Strategy = SaveMe,
         groupStrategy: GroupStrategy = Default,
         groupKey: GroupKey = defaultGroup
-): Act = SingleAct(id, this, strategy, groupStrategy)
+): Act = SingleAct(id, this, strategy, groupStrategy, groupKey)
 
 typealias ActKey = String
 typealias GroupMap = ConcurrentHashMap<ActKey, Disposable>
@@ -93,6 +90,7 @@ class AgentImpl : Agent {
                     .doFinally(removeFromMap)
                     .doOnDispose { log("${act.id} - Act Canceled") }
                     .subscribe({}, e)
+            else -> throw IllegalArgumentException()
         }.let { map.put(act.id, it) }
     }
 
