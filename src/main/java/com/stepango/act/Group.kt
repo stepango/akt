@@ -1,5 +1,6 @@
 package com.stepango.act
 
+typealias Id = String
 typealias GroupKey = String
 
 val defaultGroup = "default_group"

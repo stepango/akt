@@ -1,13 +1,16 @@
 package com.stepango.act.internal
 
-import com.stepango.act.Agent
+import com.stepango.act.Launcher
 import com.stepango.act.Default
 import com.stepango.act.GroupKey
 import com.stepango.act.GroupStrategy
 import com.stepango.act.GroupStrategyHolder
+import com.stepango.act.Id
 import com.stepango.act.KillGroup
 import com.stepango.act.KillMe
 import com.stepango.act.SaveMe
+import com.stepango.act.Store
+import com.stepango.act.StoreImpl
 import com.stepango.act.Strategy
 import com.stepango.act.StrategyHolder
 import com.stepango.act.defaultGroup
@@ -19,11 +22,11 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 interface Act : StrategyHolder, GroupStrategyHolder {
-    val id: String
+    val id: Id
 }
 
 class CompletableAct(
-        override val id: String,
+        override val id: Id,
         val completable: Completable,
         override val strategy: Strategy = SaveMe,
         override val groupStrategy: GroupStrategy = Default,
@@ -31,7 +34,7 @@ class CompletableAct(
 ) : Act
 
 class SingleAct<T : Any>(
-        override val id: String,
+        override val id: Id,
         val single: Single<T>,
         override val strategy: Strategy = SaveMe,
         override val groupStrategy: GroupStrategy = Default,
@@ -39,14 +42,14 @@ class SingleAct<T : Any>(
 ) : Act
 
 fun Completable.toAct(
-        id: String,
+        id: Id,
         strategy: Strategy = SaveMe,
         groupStrategy: GroupStrategy = Default,
         groupKey: GroupKey = defaultGroup
 ): Act = CompletableAct(id, this, strategy, groupStrategy, groupKey)
 
 fun <T : Any> Single<T>.toAct(
-        id: String,
+        id: Id,
         strategy: Strategy = SaveMe,
         groupStrategy: GroupStrategy = Default,
         groupKey: GroupKey = defaultGroup
@@ -55,50 +58,57 @@ fun <T : Any> Single<T>.toAct(
 typealias ActKey = String
 typealias GroupMap = ConcurrentHashMap<ActKey, Disposable>
 
-class AgentImpl : Agent {
-    private val groupsMap = ConcurrentHashMap<GroupKey, GroupMap>()
+class LauncherImpl(val store: Store, lifecycle: Lifecycle) : Launcher {
 
-    override fun execute(act: Act, e: (Throwable) -> Unit) {
-        val actsMap = groupsMap[act.groupKey]
-                ?: ConcurrentHashMap<ActKey, Disposable>().apply { groupsMap[act.groupKey] = this }
-        if (act.groupStrategy == KillGroup) actsMap.values.forEach { it.dispose() }
-        return when {
-            actsMap.containsKey(act.id) -> when (act.strategy) {
-                KillMe -> {
-                    cancel(act.id)
-                    startExecution(act, actsMap, e)
-                }
-                SaveMe -> log("${act.id} - Act duplicate")
-            }
-            else -> startExecution(act, actsMap, e)
-        }
+    init {
+        lifecycle.doOnDestroy { cancelAll() }
     }
 
     @Synchronized
-    private fun startExecution(act: Act, map: GroupMap, e: (Throwable) -> Unit) {
-        log("${act.id} - Act Started")
-        val removeFromMap = {
-            map.remove(act.id)
-            log("${act.id} - Act Finished")
+    override fun execute(act: Act, e: (Throwable) -> Unit) {
+        if (act.groupStrategy == KillGroup) store.stopGroup(act.groupKey)
+        return when {
+            store.isRunning(act.groupKey, act.id) -> when (act.strategy) {
+                KillMe -> {
+                    stop(act.groupKey, act.id)
+                    startExecution(act, e)
+                }
+                SaveMe -> log("${act.id} - Act duplicate")
+            }
+            else -> startExecution(act, e)
         }
-        when (act) {
-            is CompletableAct -> act.completable
-                    .doFinally(removeFromMap)
-                    .doOnDispose { log("${act.id} - Act Canceled") }
-                    .subscribe({}, e)
-            is SingleAct<*> -> act.single
-                    .doFinally(removeFromMap)
-                    .doOnDispose { log("${act.id} - Act Canceled") }
-                    .subscribe({}, e)
-            else -> throw IllegalArgumentException()
-        }.let { map.put(act.id, it) }
     }
 
-    override fun cancel(id: String) {
-        groupsMap.values.forEach { it[id]?.dispose() }
+    private fun startExecution(act: Act, e: (Throwable) -> Unit) {
+        log("${act.id} - Act Started " + System.currentTimeMillis())
+        val removeFromMap = {
+            store.stop(act.groupKey, act.id)
+            log("${act.id} - Act Finished " + System.currentTimeMillis())
+        }
+        store.start(act.groupKey, act.id) {
+            when (act) {
+                is CompletableAct -> act.completable
+                        .doFinally(removeFromMap)
+                        .doOnDispose { log("${act.id} - Act Canceled " + System.currentTimeMillis()) }
+                        .subscribe({}, e)
+                is SingleAct<*> -> act.single
+                        .doFinally(removeFromMap)
+                        .doOnDispose { log("${act.id} - Act Canceled " + System.currentTimeMillis()) }
+                        .subscribe({}, e)
+                else -> throw IllegalArgumentException()
+            }
+        }
     }
 
-    override fun cancelAll() = groupsMap.values.forEach { it.values.forEach(Disposable::dispose) }
+    override fun stop(groupKey: GroupKey, id: Id) {
+        store.stop(groupKey, id)
+    }
+
+    override fun cancelAll() = store.stopAll()
+}
+
+interface Lifecycle {
+    fun doOnDestroy(f: () -> Unit)
 }
 
 fun log(obj: Any) {
@@ -106,16 +116,19 @@ fun log(obj: Any) {
 }
 
 fun main(args: Array<String>) {
-    val a = AgentImpl()
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
+    val store = StoreImpl()
+    val launcher = LauncherImpl(store, object : Lifecycle {
+        override fun doOnDestroy(f: () -> Unit) = Unit
+    })
+    launcher.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
             id = "Like",
             groupStrategy = KillGroup,
             groupKey = "Like-Dislike-PostId-1234"))
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
+    launcher.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
             id = "Dislike",
             groupStrategy = KillGroup,
             groupKey = "Like-Dislike-PostId-1234"))
-    a.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
+    launcher.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
             id = "Like",
             groupStrategy = KillGroup,
             groupKey = "Like-Dislike-PostId-1234"))
