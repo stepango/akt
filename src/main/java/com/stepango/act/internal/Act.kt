@@ -1,6 +1,6 @@
 package com.stepango.act.internal
 
-import com.stepango.act.Launcher
+import com.stepango.act.ActExecutor
 import com.stepango.act.Default
 import com.stepango.act.GroupKey
 import com.stepango.act.GroupStrategy
@@ -9,8 +9,8 @@ import com.stepango.act.Id
 import com.stepango.act.KillGroup
 import com.stepango.act.KillMe
 import com.stepango.act.SaveMe
-import com.stepango.act.Store
-import com.stepango.act.StoreImpl
+import com.stepango.act.GroupDisposable
+import com.stepango.act.GroupDisposableImpl
 import com.stepango.act.Strategy
 import com.stepango.act.StrategyHolder
 import com.stepango.act.defaultGroup
@@ -58,7 +58,10 @@ fun <T : Any> Single<T>.toAct(
 typealias ActKey = String
 typealias GroupMap = ConcurrentHashMap<ActKey, Disposable>
 
-class LauncherImpl(val store: Store, lifecycle: Lifecycle) : Launcher {
+class ActExecutorImpl(
+        val groupDisposable: GroupDisposable,
+        lifecycle: Lifecycle
+) : ActExecutor {
 
     init {
         lifecycle.doOnDestroy { cancelAll() }
@@ -66,9 +69,9 @@ class LauncherImpl(val store: Store, lifecycle: Lifecycle) : Launcher {
 
     @Synchronized
     override fun execute(act: Act, e: (Throwable) -> Unit) {
-        if (act.groupStrategy == KillGroup) store.stopGroup(act.groupKey)
+        if (act.groupStrategy == KillGroup) groupDisposable.removeGroup(act.groupKey)
         return when {
-            store.isRunning(act.groupKey, act.id) -> when (act.strategy) {
+            groupDisposable.contains(act.groupKey, act.id) -> when (act.strategy) {
                 KillMe -> {
                     stop(act.groupKey, act.id)
                     startExecution(act, e)
@@ -82,10 +85,10 @@ class LauncherImpl(val store: Store, lifecycle: Lifecycle) : Launcher {
     private fun startExecution(act: Act, e: (Throwable) -> Unit) {
         log("${act.id} - Act Started " + System.currentTimeMillis())
         val removeFromMap = {
-            store.stop(act.groupKey, act.id)
+            groupDisposable.remove(act.groupKey, act.id)
             log("${act.id} - Act Finished " + System.currentTimeMillis())
         }
-        store.start(act.groupKey, act.id) {
+        groupDisposable.add(act.groupKey, act.id) {
             when (act) {
                 is CompletableAct -> act.completable
                         .doFinally(removeFromMap)
@@ -101,10 +104,10 @@ class LauncherImpl(val store: Store, lifecycle: Lifecycle) : Launcher {
     }
 
     override fun stop(groupKey: GroupKey, id: Id) {
-        store.stop(groupKey, id)
+        groupDisposable.remove(groupKey, id)
     }
 
-    override fun cancelAll() = store.stopAll()
+    override fun cancelAll() = groupDisposable.removeAll()
 }
 
 interface Lifecycle {
@@ -116,8 +119,8 @@ fun log(obj: Any) {
 }
 
 fun main(args: Array<String>) {
-    val store = StoreImpl()
-    val launcher = LauncherImpl(store, object : Lifecycle {
+    val store = GroupDisposableImpl()
+    val launcher = ActExecutorImpl(store, object : Lifecycle {
         override fun doOnDestroy(f: () -> Unit) = Unit
     })
     launcher.execute(Completable.timer(2, TimeUnit.SECONDS).toAct(
